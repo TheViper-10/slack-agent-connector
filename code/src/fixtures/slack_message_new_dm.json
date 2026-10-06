@@ -1,0 +1,35 @@
+{
+  "context": {
+    "dev_oid": "don:identity:dvrv-us-1:devo/1",
+    "secrets": { "service_account_token": "<REDACTED:JWT>" },
+    "service_account_id": "don:identity:dvrv-us-1:devo/1:svcacc/1",
+    "snap_in_id": "don:integration:dvrv-us-1:devo/1:snap_in/1"
+  },
+  "execution_metadata": {
+    "devrev_endpoint": "https://api.dev.devrev-eng.ai",
+    "event_type": "custom:slack_events",
+    "function_name": "slack_handler",
+    "request_id": "fixture-ui-ops-dm"
+  },
+  "input_data": {
+    "event_sources": {},
+    "global_values": {
+      "agent_id": "don:core:dvrv-us-1:devo/1:ai_agent/1",
+      "act_as_user_id": "don:identity:dvrv-us-1:devo/1:devu/3",
+      "slack_bot_user_id": "UBOT"
+    },
+    "resources": { "keyrings": { "slack_connection": { "secret": "<REDACTED:SLACK_TOKEN>" } } }
+  },
+  "payload": {
+    "event": {
+      "channel": "D123",
+      "channel_type": "im",
+      "text": "Run the login test suite",
+      "ts": "1700000000.000100",
+      "type": "message",
+      "user": "U123"
+    },
+    "team_id": "T123",
+    "type": "event_callback"
+  }
+}

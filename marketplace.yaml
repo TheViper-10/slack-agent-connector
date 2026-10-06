@@ -1,0 +1,11 @@
+dev:
+  marketplace_listing_slug: slack-agent-connector
+  snap_in_package_slug: slack-agent-connector
+
+qa:
+  marketplace_listing_slug: slack-agent-connector
+  snap_in_package_slug: slack-agent-connector
+
+prod:
+  marketplace_listing_slug: slack-agent-connector
+  snap_in_package_slug: slack-agent-connector

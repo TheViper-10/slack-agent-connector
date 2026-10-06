@@ -1,0 +1,193 @@
+version: "2"
+
+name: Slack Agent Connector
+description: Connect any DevRev AI agent to a Slack app. Install once per Slack app and agent pair; DMs and channel mentions invoke the agent and replies return to the thread.
+
+service_account:
+  display_name: Slack Agent Connector
+  scopes:
+    self:
+      - scope: app_fragment:write
+        optional: false
+        reason: Install hidden DM fields used to correlate agent replies with Slack threads.
+      - scope: custom_object:slack_connector_state:all
+        optional: false
+        reason: Store per-channel Slack polling cursors, thread watches, and tick status.
+      - scope: custom_object:slack_connector_receipt:all
+        optional: false
+        reason: Store write-ahead dispatch receipts so each Slack message invokes the agent exactly once.
+      - scope: tenant_fragment:write
+        optional: false
+        reason: Define the custom object types that hold Slack polling state.
+      - scope: role:read
+        optional: true
+        reason: Resolve the Viewer role used to share polling state read-only with the act-as user for inspection.
+      - scope: artifact:read
+        optional: true
+        reason: Download agent-generated artifacts so they can be attached to Slack replies.
+      - scope: dev_org:read
+        optional: false
+        reason: Validate that the agent and act-as user belong to the installed org and resolve the DevRev organization slug during activation.
+      - scope: ai_agent:read
+        optional: false
+        reason: Resolve the agent service account ID for reply filtering.
+    impersonate:
+      - act_as: all_devusers
+        scopes:
+          - scope: ai_agent:execute
+            optional: true
+            reason: Execute the agent from DM timeline comments on behalf of the act-as user.
+          - scope: ai_agent:read
+            optional: true
+            reason: Resolve the agent as the act-as user when adding it to the DM, and as a fallback for agent lookup.
+          - scope: ai_agent_session:write
+            optional: false
+            reason: Create DM timeline comments that execute the agent on behalf of the act-as user.
+          - scope: artifact:create
+            optional: true
+            reason: Upload Slack attachments so the agent can inspect them.
+          - scope: dev_user:read
+            optional: false
+            reason: Validate act-as user identity during act-as token issuance.
+
+inputs:
+  organization:
+    - name: agent_id
+      description: DON of the AI agent to invoke for every request. Must belong to the org this snap-in is installed in.
+      field_type: id
+      id_type:
+        - ai_agent
+      default_value: "don:core:dvrv-us-1:devo/XXXXXXX:ai_agent/1"
+      is_required: true
+      ui:
+        display_name: Agent
+    - name: act_as_user_id
+      description: DON of the DevRev user who owns every agent invocation. Must belong to the same org as the agent.
+      field_type: text
+      default_value: "don:identity:dvrv-us-1:devo/XXXXXXX:devu/1"
+      is_required: true
+      ui:
+        display_name: Act-as user ID
+    - name: debug_errors
+      description: Debugging only. When true, Slack failure replies include the failing step and a redacted, trimmed DevRev error. Keep false in production.
+      field_type: bool
+      default_value: false
+      is_required: false
+      ui:
+        display_name: Show debug errors in Slack
+    - name: display_name
+      description: Name of the agent as shown in Slack failure replies, for example UI Ops agent.
+      field_type: text
+      default_value: "DevRev agent"
+      is_required: false
+      ui:
+        display_name: Agent display name
+    - name: invoke_mode
+      description: "How a Slack message reaches the agent. agent (default) creates a DM and invokes the agent; the agent reply is relayed to the thread. workflow records a receipt carrying the Slack message facts and does nothing else, so a workflow on the receipt-created trigger decides what happens next."
+      field_type: text
+      default_value: "agent"
+      is_required: false
+      ui:
+        display_name: Invoke mode (agent or workflow)
+    - name: channel_allowlist
+      description: Optional comma-separated Slack channel IDs. When set, only these channels are polled. Empty means every conversation the bot belongs to.
+      field_type: text
+      is_required: false
+      ui:
+        display_name: Channel allowlist
+    - name: slack_app_id
+      description: Slack application ID discovered during activation.
+      field_type: text
+      is_required: false
+      ui:
+        display_name: Slack app ID
+        is_hidden: true
+    - name: slack_team_id
+      description: Slack workspace ID discovered during activation.
+      field_type: text
+      is_required: false
+      ui:
+        display_name: Slack team ID
+        is_hidden: true
+    - name: slack_bot_user_id
+      description: Slack bot user ID discovered during activation.
+      field_type: text
+      is_required: false
+      ui:
+        display_name: Slack bot user ID
+        is_hidden: true
+    - name: dev_org_slug
+      description: DevRev organization slug discovered during activation.
+      field_type: text
+      is_required: false
+      ui:
+        display_name: DevRev organization slug
+        is_hidden: true
+
+keyrings:
+  organization:
+    - name: slack_connection
+      display_name: Slack bot token
+      description: Bot User OAuth Token (xoxb-…) of the Slack app this install connects. Use one Slack app per install.
+      types:
+        - snap_in_secret
+
+event_sources:
+  organization:
+    - name: slack-poll-timer
+      display_name: Slack poll timer
+      description: Fires every minute to poll Slack for agent DMs and @mentions. No public webhook URL is used.
+      type: timer-events
+      config:
+        cron: "* * * * *"
+        metadata:
+          event_key: slack_poll
+    - name: agent-dm-events
+      display_name: Agent response events
+      description: Receives agent DM replies.
+      type: devrev-webhook
+      config:
+        event_types:
+          - timeline_entry_created
+          - ai_agent_response
+        filter:
+          jq_query: |
+            if .type == "timeline_entry_created" then
+              .timeline_entry_created.entry.type == "timeline_comment" and
+              .timeline_entry_created.entry.object_type == "dm"
+            elif .type == "ai_agent_response" then
+              true
+            else
+              false
+            end
+
+functions:
+  - name: slack_poller
+    description: Polls Slack DMs and channel mentions every minute and invokes the agent exactly once per message.
+  - name: devrev_handler
+    description: Relays asynchronous agent responses to Slack.
+  - name: hook_handler
+    description: Validates org membership, claims the Slack app, and installs DM correlation and Slack polling state schemas.
+
+hooks:
+  - type: validate
+    function: hook_handler
+  - type: activate
+    function: hook_handler
+  - type: update
+    function: hook_handler
+  - type: deactivate
+    function: hook_handler
+
+automations:
+  - name: poll-slack-for-agent-requests
+    source: slack-poll-timer
+    event_types:
+      - timer.tick
+    function: slack_poller
+  - name: relay-agent-response-to-slack
+    source: agent-dm-events
+    event_types:
+      - timeline_entry_created
+      - ai_agent_response
+    function: devrev_handler

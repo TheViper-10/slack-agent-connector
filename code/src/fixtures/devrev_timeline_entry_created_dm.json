@@ -1,0 +1,32 @@
+{
+  "context": {
+    "dev_oid": "don:identity:dvrv-us-1:devo/1",
+    "secrets": { "service_account_token": "<REDACTED:JWT>" },
+    "snap_in_id": "don:integration:dvrv-us-1:devo/1:snap_in/1"
+  },
+  "execution_metadata": {
+    "devrev_endpoint": "https://api.dev.devrev-eng.ai",
+    "event_type": "timeline_entry_created",
+    "function_name": "devrev_handler",
+    "request_id": "fixture-ui-ops-reply"
+  },
+  "input_data": {
+    "event_sources": {},
+    "global_values": { "dev_org_slug": "example" },
+    "resources": { "keyrings": { "slack_connection": { "secret": "<REDACTED:SLACK_TOKEN>" } } }
+  },
+  "payload": {
+    "timeline_entry_created": {
+      "entry": {
+        "body": "All tests passed.",
+        "created_by_agent": { "id": "don:identity:dvrv-us-1:devo/1:svcacc/agent" },
+        "external_ref": "response:prompt-comment",
+        "id": "don:core:dvrv-us-1:devo/1:timeline_comment/2",
+        "object": "don:core:dvrv-us-1:devo/1:dm/1",
+        "object_type": "dm",
+        "type": "timeline_comment"
+      }
+    },
+    "type": "timeline_entry_created"
+  }
+}
