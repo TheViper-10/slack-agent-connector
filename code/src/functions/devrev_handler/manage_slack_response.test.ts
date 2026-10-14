@@ -147,6 +147,106 @@ const input = (overrides: Partial<Record<string, unknown>> = {}) => ({
   ...overrides,
 });
 
+describe('manageSlackResponse post_root', () => {
+  const ROOT = { channel: CHANNEL, install: INSTALL, response_event: 'ticket-42', text: 'Starting work on Ticket 42.' };
+  const rootSlack = (ts: string): WebClient =>
+    ({
+      auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) },
+      chat: { postMessage: jest.fn(async () => ({ ok: true, ts })) },
+      conversations: { history: jest.fn(async () => ({ messages: [], ok: true })) },
+    }) as unknown as WebClient;
+
+  it('posts one top-level message with no thread_ts and records it under a root key', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'unused');
+    const slack = rootSlack('1700000002.000300');
+    const result = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, message_ts: undefined, thread_ts: undefined, workflow_mode: 'workflow' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(result).toMatchObject({ outcome: 'ok', posted: true, slack_ts: '1700000002.000300' });
+    const call = (slack.chat.postMessage as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+    expect(call).not.toHaveProperty('thread_ts');
+    expect(call).toMatchObject({ channel: CHANNEL, text: ROOT.text });
+    const again = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, message_ts: undefined, thread_ts: undefined, workflow_mode: 'workflow' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(again.posted).toBe(true);
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses to post without a unique response_event key or without workflow routing', async () => {
+    const api = new FakeApi();
+    const slack = rootSlack('1.000001');
+    const noKey = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, response_event: undefined, workflow_mode: 'workflow' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(noKey.outcome).toBe('error');
+    const direct = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, workflow_mode: 'direct' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(direct.outcome).toBe('blocked');
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('a timeout after a possible root post stays unknown and reconciles from channel history, never reposts', async () => {
+    const api = new FakeApi();
+    const postMessage = jest.fn(async () => {
+      throw new Error('socket timeout');
+    });
+    const slack = { ...rootSlack('1.0'), chat: { postMessage } } as unknown as WebClient;
+    const first = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, workflow_mode: 'workflow' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(first.outcome).toBe('unknown');
+    const intent = JSON.parse(
+      String(api.rows().find((r) => r.unique_key.endsWith(':intent'))?.custom_fields[FIELD('status')])
+    );
+    const history = jest.fn(async () => ({
+      messages: [
+        {
+          metadata: {
+            event_payload: { attempt_id: intent.attempt_id, response_key: intent.response_key },
+            event_type: 'slack_workflow_response',
+          },
+          ts: '1700000003.000400',
+          user: 'BOT1',
+        },
+      ],
+      ok: true,
+    }));
+    const recon = { ...rootSlack('1.0'), conversations: { history } } as unknown as WebClient;
+    const second = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, workflow_mode: 'workflow' }),
+      api.client(),
+      { slack: recon },
+      'dev-1'
+    );
+    expect(second).toMatchObject({ outcome: 'ok', posted: true, slack_ts: '1700000003.000400' });
+    expect(postMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('manageSlackResponse smoke (current immutable-stage implementation)', () => {
   it('acknowledges an existing job without inventing or changing its working session; a repeat stays fenced', async () => {
     const api = new FakeApi();
@@ -157,7 +257,10 @@ describe('manageSlackResponse smoke (current immutable-stage implementation)', (
     expect(result.posted).toBe(true);
     const triaged = api.rows().find((row) => row.unique_key.endsWith(':triaged'))!;
     expect(JSON.parse(String(triaged.custom_fields[FIELD('status')]))).toMatchObject({
-      job_id: 'job-1', acting_session: 'unknown', agent_session_id: 'reply-session', no_job: false,
+      job_id: 'job-1',
+      acting_session: 'unknown',
+      agent_session_id: 'reply-session',
+      no_job: false,
     });
     await manageSlackResponse('send', acknowledgement, api.client(), { slack }, 'dev-1');
     expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);

@@ -230,9 +230,9 @@ operations:
           ui: { is_hidden: true }
         - name: action
           field_type: enum
-          allowed_values: [prepare, record_triage, send, reconcile, get, finalize, fail]
+          allowed_values: [prepare, record_triage, send, post_root, reconcile, get, finalize, fail]
           is_required: true
-          description: Response-tracking step to perform.
+          description: Response-tracking step to perform. post_root sends a top-level message to channel with no incoming message; it needs response_event as its unique key.
         - name: channel
           field_type: text
           is_required: true

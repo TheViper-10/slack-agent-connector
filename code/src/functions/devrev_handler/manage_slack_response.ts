@@ -8,7 +8,15 @@ import { keyPrefix, resolveStateViewer, STATE_LEAF_TYPE, type StateViewer } from
 // Existing private state rows only. Every stage is immutable; the send-intent row is never updated,
 // reclaimed or deleted. A request timeout is unresolved, not authorization to send again.
 export const RESPONSE_KIND = 'response';
-export type SlackResponseAction = 'prepare' | 'record_triage' | 'send' | 'reconcile' | 'get' | 'finalize' | 'fail';
+export type SlackResponseAction =
+  | 'prepare'
+  | 'record_triage'
+  | 'send'
+  | 'post_root'
+  | 'reconcile'
+  | 'get'
+  | 'finalize'
+  | 'fail';
 export interface ManageSlackResponseInput {
   install: string;
   channel?: string;
@@ -80,6 +88,9 @@ export const lockKey = (install: string, channel: string, ts: string, event: str
   `${responseKey(install, channel, ts, event)}:intent`;
 export const factKey = (install: string, channel: string, ts: string, event: string, stage: string): string =>
   `${responseKey(install, channel, ts, event)}:${stage}`;
+// A root post answers no incoming message, so its records are keyed by channel and a caller-chosen event.
+export const rootKey = (install: string, channel: string, event: string, stage: string): string =>
+  `${keyPrefix(install)}root:${channel}:${event}:${stage}`;
 
 class Store {
   constructor(
@@ -295,6 +306,146 @@ const reconcile = async (
   return output('ok', 'Reply confirmed from Slack history.', c);
 };
 
+// Root post: a top-level message in a channel, for a Ticket that opens its own Slack thread. Same
+// write-ahead discipline as send: one intent fence, no automatic repeat, reconcile by channel history.
+const reconcileRoot = async (
+  store: Store,
+  i: ManageSlackResponseInput,
+  key: (stage: string) => string,
+  deps: SlackSendDeps
+): Promise<ManageSlackResponseOutput> => {
+  const confirmed = await store.read(key('confirmed'));
+  if (confirmed) return output('ok', 'Root post confirmed.', confirmed);
+  const failed = await store.read(key('failed'));
+  if (failed) return output('error', 'Slack rejected the root post. It was not repeated.', failed);
+  const intent = await store.read(key('intent'));
+  if (!intent) return output('unknown', 'No root post attempt is recorded.');
+  let cursor: string | undefined;
+  const matches = new Set<string>();
+  try {
+    const bot = (await deps.slack.auth.test()).user_id;
+    if (!bot) return output('unknown', 'Slack identity could not be read.', intent);
+    do {
+      const p = await deps.slack.conversations.history({
+        channel: i.channel as string,
+        cursor,
+        limit: 200,
+        include_all_metadata: true,
+      });
+      if (!p.ok) return output('unknown', 'Slack history could not be read.', intent);
+      for (const m of p.messages ?? []) {
+        const meta = m.metadata as { event_type?: string; event_payload?: Record<string, unknown> } | undefined;
+        if (
+          m.user === bot &&
+          meta?.event_type === 'slack_workflow_response' &&
+          meta.event_payload?.['response_key'] === intent.data.response_key &&
+          meta.event_payload?.['attempt_id'] === intent.data.attempt_id &&
+          m.ts
+        )
+          matches.add(m.ts);
+      }
+      cursor = p.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  } catch {
+    return output('unknown', 'Slack history could not be read. No root post was repeated.', intent);
+  }
+  if (matches.size !== 1)
+    return output(
+      'unknown',
+      matches.size
+        ? 'Multiple matching root posts need operator review.'
+        : 'The root post result is still unknown. No post was repeated.',
+      intent
+    );
+  const c = await store.fact(key('confirmed'), {
+    ...intent.data,
+    stage: 'confirmed',
+    slack_ts: [...matches][0],
+    confirmed_by: 'slack_history',
+    timestamp: new Date().toISOString(),
+  });
+  return output('ok', 'Root post confirmed from Slack history.', c);
+};
+
+const postRoot = async (
+  i: ManageSlackResponseInput,
+  api: DevRevClient,
+  deps: SlackSendDeps,
+  member: string | undefined
+): Promise<ManageSlackResponseOutput> => {
+  if (!i.install || !i.channel) return output('error', 'An exact destination channel is required.');
+  if (!i.response_event?.trim() || i.response_event.length > 128)
+    return output('error', 'A unique root-post key of up to 128 characters is required.');
+  if (!i.text?.trim()) return output('error', 'Root post text is required.');
+  if (i.workflow_mode !== 'workflow')
+    return output('blocked', 'Root posts require workflow routing; no competing post path was used.');
+  const viewer = await resolveStateViewer(api, member);
+  if (!viewer?.stateRole)
+    return output('error', 'Protected reply records are not accessible to the configured operator.');
+  const store = new Store(api, viewer);
+  const event = i.response_event;
+  const key = (stage: string): string => rootKey(i.install, i.channel as string, event, stage);
+  const confirmed = await store.read(key('confirmed'));
+  if (confirmed) return output('ok', 'This root post is already confirmed. It was not repeated.', confirmed);
+  if (await store.read(key('intent'))) return reconcileRoot(store, i, key, deps);
+  const triage = await store.fact(key('triaged'), { ...(await triageData(api, i)), stage: 'triaged' });
+  const intentData = {
+    ...triage.data,
+    stage: 'reply_attempted',
+    response_key: hash(key('intent')),
+    writer_nonce: randomUUID(),
+    attempt_id: randomUUID(),
+    reply_text_hash: hash(i.text),
+  };
+  const intent = await store.create(key('intent'), intentData);
+  if (!intent.won || !intent.row)
+    return output('unknown', 'Root post ownership could not be confirmed. No post was repeated.', intent.row);
+  let result: Awaited<ReturnType<WebClient['chat']['postMessage']>>;
+  try {
+    result = await deps.slack.chat.postMessage({
+      channel: i.channel,
+      text: i.text,
+      metadata: {
+        event_type: 'slack_workflow_response',
+        event_payload: { response_key: intentData.response_key, attempt_id: intentData.attempt_id },
+      },
+      unfurl_links: false,
+      unfurl_media: false,
+    });
+  } catch (e) {
+    const slackError = e as { code?: string; data?: { ok?: boolean; error?: string } };
+    if (slackError.code === 'slack_webapi_platform_error' && slackError.data?.ok === false) {
+      const row = await store.fact(key('failed'), {
+        ...intentData,
+        stage: 'failed',
+        error_code: slackError.data.error || 'slack_rejected',
+      });
+      return output('error', 'Slack rejected the root post. It was not repeated.', row);
+    }
+    await store.fact(key('unknown'), { ...intentData, stage: 'unknown', error_code: 'send_result_unknown' });
+    return output(
+      'unknown',
+      'Slack did not return a trustworthy result. Reconciliation is required; no repeat was attempted.',
+      intent.row
+    );
+  }
+  if (!result.ok || !result.ts) {
+    const row = await store.fact(key(result.ok === false ? 'failed' : 'unknown'), {
+      ...intentData,
+      stage: result.ok === false ? 'failed' : 'unknown',
+      error_code: result.error || 'missing_slack_confirmation',
+    });
+    return output(result.ok === false ? 'error' : 'unknown', 'No successful root post confirmation was returned.', row);
+  }
+  const c = await store.fact(key('confirmed'), {
+    ...intentData,
+    stage: 'confirmed',
+    slack_ts: result.ts,
+    confirmed_by: 'slack_response',
+  });
+  return output('ok', 'Root post sent and confirmed.', c);
+};
+
 export const manageSlackResponse = async (
   action: SlackResponseAction,
   original: ManageSlackResponseInput,
@@ -302,6 +453,7 @@ export const manageSlackResponse = async (
   deps: SlackSendDeps,
   member: string | undefined
 ): Promise<ManageSlackResponseOutput> => {
+  if (action === 'post_root') return postRoot(original, api, deps, member);
   const i = { ...original, response_event: original.response_event || 'initial' };
   if (!i.install || !i.channel || !i.message_ts || !/^[0-9]+\.[0-9]+$/.test(i.message_ts))
     return output('error', 'An exact incoming message and destination are required.');

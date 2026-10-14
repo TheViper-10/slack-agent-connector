@@ -77,7 +77,8 @@ export const handleManageSlackResponse = async (event: FunctionEvent): Promise<W
     message_ts: data['message_ts'] as string | undefined,
     rationale: data['rationale'] as string | undefined,
     receipt_id: data['receipt_id'] as string | undefined,
-    response_event: (data['response_event'] as string | undefined) || 'initial',
+    // No default here: post_root needs an explicit key, and manageSlackResponse defaults the others.
+    response_event: data['response_event'] as string | undefined,
     session_key: data['session_key'] as string | undefined,
     skill_call_id: data['skill_call_id'] as string | undefined,
     text: data['text'] as string | undefined,
