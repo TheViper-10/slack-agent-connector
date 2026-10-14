@@ -13,7 +13,9 @@ const main = async (): Promise<void> => {
     .option('functionName', { choices: Object.keys(functionFactory) as FunctionFactoryType[], demandOption: true })
     .parse();
   const fixture = JSON.parse(await readFile(resolve('src/fixtures', argv.fixturePath), 'utf8')) as FunctionEvent;
-  await functionFactory[argv.functionName]([fixture]);
+  const handler = functionFactory[argv.functionName];
+  if (typeof handler !== 'function') throw new Error('Operation maps use the SDK operation runner.');
+  await handler([fixture]);
 };
 
 void main();

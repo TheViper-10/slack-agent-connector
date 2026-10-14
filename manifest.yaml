@@ -31,6 +31,9 @@ service_account:
       - scope: ai_agent:read
         optional: false
         reason: Resolve the agent service account ID for reply filtering.
+      - scope: ai_agent_session:read
+        optional: true
+        reason: Record the actual workflow agent session identity and runtime when accessible; otherwise record an explicit unknown instead of substituting the current agent default.
     impersonate:
       - act_as: all_devusers
         scopes:
@@ -162,10 +165,8 @@ event_sources:
             end
 
 functions:
-  - name: slack_poller
-    description: Polls Slack DMs and channel mentions every minute and invokes the agent exactly once per message.
   - name: devrev_handler
-    description: Relays asynchronous agent responses to Slack.
+    description: Routes polling ticks, asynchronous agent replies and tracked workflow replies to their existing handlers.
   - name: hook_handler
     description: Validates org membership, claims the Slack app, and installs DM correlation and Slack polling state schemas.
 
@@ -184,10 +185,122 @@ automations:
     source: slack-poll-timer
     event_types:
       - timer.tick
-    function: slack_poller
+    function: devrev_handler
   - name: relay-agent-response-to-slack
     source: agent-dm-events
     event_types:
       - timeline_entry_created
       - ai_agent_response
     function: devrev_handler
+
+# Generic tracked Slack response, registered through the native SDK OperationMap contract.
+# Existing event handlers/hooks/automations/keyrings stay unchanged. The native adapter invokes
+# the same response logic; no new package, install or logging service.
+operations:
+  - name: manage_slack_response
+    slug: manage_slack_response
+    description: Track one Slack response end to end for a tracked incoming message (prepare the record, record agent-authored triage rationale/decision, send through an atomic write-ahead lock, reconcile against Slack thread history, read status, or finalize/record a definite failure). Never resends an existing lock automatically.
+    function: devrev_handler
+    type: action
+    keyrings:
+      - name: slack_connection
+        description: Existing Slack bot connection used for replies and reconciliation.
+        optional: true
+        types: [snap_in_secret]
+        display_name: Slack bot token
+    static_scopes:
+      self:
+        - scope: snap_in:read
+        - scope: custom_object:slack_connector_state:all
+        - scope: custom_object:slack_connector_receipt:read
+        - scope: ai_agent_session:read
+        - scope: role:read
+    inputs:
+      fields:
+        - name: node
+          field_type: text
+          default_value: manage_slack_response
+          is_required: true
+          description: Fixed per-operation route literal the shared devrev_handler function dispatches on. Not caller- or model-supplied.
+          ui: { is_hidden: true }
+        - name: snap_in_id
+          field_type: text
+          is_required: false
+          description: Installed connector ID supplied by the configured workflow step.
+          ui: { is_hidden: true }
+        - name: action
+          field_type: enum
+          allowed_values: [prepare, record_triage, send, reconcile, get, finalize, fail]
+          is_required: true
+          description: Response-tracking step to perform.
+        - name: channel
+          field_type: text
+          is_required: true
+          description: Slack channel ID of the tracked message.
+        - name: message_ts
+          field_type: text
+          is_required: true
+          description: Slack ts of the incoming message this response answers.
+        - name: thread_ts
+          field_type: text
+          description: Slack thread_ts of the incoming message, when it is a reply.
+        - name: receipt_id
+          field_type: text
+          description: Original intake receipt ID; validated to match channel/message/thread/install on the initial send.
+        - name: workflow_run_id
+          field_type: text
+          description: Correlating workflow run ID, recorded for journaling only.
+        - name: session_key
+          field_type: text
+          description: Deprecated correlation passthrough; the acting session's creator/runtime/version are journaled from the trusted agent_session_id via ai-agent.sessions.get, never from this field.
+        - name: agent_session_id
+          field_type: id
+          id_type: [ai_agent_session]
+          description: Injected by the workflow skill from authenticated execution metadata. Trusted, never model-supplied.
+          ui: { is_hidden: true }
+        - name: skill_call_id
+          field_type: text
+          description: Injected by the workflow skill from authenticated execution metadata. Trusted, never model-supplied.
+          ui: { is_hidden: true }
+        - name: rationale
+          field_type: text
+          description: Agent-authored rationale for the triage decision or the send. Required for record_triage and send.
+        - name: decision
+          field_type: text
+          description: Agent-authored decision summary. Required for record_triage and send.
+        - name: job_id
+          field_type: text
+          description: Selected job Issue this response belongs to. Omit for an explicit no-job contact question.
+        - name: acting_session
+          field_type: text
+          description: Existing working session for the selected job, when known. This response does not change the job's working session.
+        - name: response_event
+          field_type: text
+          default_value: initial
+          description: Response-event key distinguishing the sender's initial response from a later, separate background progress event. Namespaced as response:<install>:<channel>:<incoming_message_ts>:<response_event>.
+        - name: text
+          field_type: text
+          description: Response text to send. Never logged or echoed back; prepare stores only a hash.
+        - name: error_code
+          field_type: text
+          description: Explicit error code to record via fail.
+    outputs:
+      fields:
+        - name: outcome
+          field_type: text
+          description: ok, blocked, unknown, or error.
+        - name: posted
+          field_type: bool
+          description: True only when a Slack post was confirmed sent on this call; preserved for compatibility with the legacy HTTP sender result shape.
+        - name: slack_ts
+          field_type: text
+          description: Confirmed Slack message ts, when known.
+        - name: record_id
+          field_type: text
+          description: Tracked response record ID.
+        - name: summary
+          field_type: text
+          description: Short human-readable outcome summary. Full detail is in the JSON body.
+        - name: body
+          field_type: text
+          description: Full JSON of the operation result (outcome, posted, slack_ts, record_id, summary) for callers that need the complete record.

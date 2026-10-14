@@ -3,7 +3,7 @@ export interface FunctionEvent {
     dev_oid: string;
     service_account_id?: string;
     snap_in_id: string;
-    secrets: { service_account_token: string };
+    secrets: { service_account_token: string; access_token?: string };
   };
   execution_metadata: {
     devrev_endpoint: string;

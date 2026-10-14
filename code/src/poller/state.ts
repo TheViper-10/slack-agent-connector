@@ -9,7 +9,7 @@ export const RECEIPT_LEAF_TYPE = 'slack_connector_receipt';
 const field = (name: string): string => `app_${APP_NAME}__${name}`;
 const SCHEMA_SPEC = { apps: [APP_NAME], tenant_fragment: true };
 
-export type StateKind = 'channel' | 'global' | 'thread';
+export type StateKind = 'channel' | 'global' | 'thread' | 'response';
 
 export interface StateRecord {
   activeUntil?: string;
