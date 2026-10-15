@@ -405,6 +405,7 @@ const postRoot = async (
     result = await deps.slack.chat.postMessage({
       channel: i.channel,
       text: i.text,
+      ...(i.thread_ts ? { thread_ts: i.thread_ts } : {}),
       metadata: {
         event_type: 'slack_workflow_response',
         event_payload: { response_key: intentData.response_key, attempt_id: intentData.attempt_id },

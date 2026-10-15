@@ -182,6 +182,21 @@ describe('manageSlackResponse post_root', () => {
     expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('posts into the given thread when thread_ts is set', async () => {
+    const api = new FakeApi();
+    const slack = rootSlack('1700000003.000400');
+    const result = await manageSlackResponse(
+      'post_root',
+      input({ ...ROOT, message_ts: undefined, thread_ts: '1700000001.000100', workflow_mode: 'workflow' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(result).toMatchObject({ outcome: 'ok', posted: true, slack_ts: '1700000003.000400' });
+    const call = (slack.chat.postMessage as jest.Mock).mock.calls[0][0] as Record<string, unknown>;
+    expect(call).toMatchObject({ channel: CHANNEL, text: ROOT.text, thread_ts: '1700000001.000100' });
+  });
+
   it('refuses to post without a unique response_event key or without workflow routing', async () => {
     const api = new FakeApi();
     const slack = rootSlack('1.000001');
