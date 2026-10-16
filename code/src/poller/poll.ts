@@ -93,6 +93,8 @@ export interface PollDeps {
    * The receipt-created workflow trigger is the only consumer.
    */
   buildReceiptPayload?: ReceiptPayloadFn;
+  /** Workflow invoke mode: runs once after a new receipt is recorded. Best effort; a failure never blocks the receipt. */
+  onReceiptRecorded?: (message: QualifiedMessage) => Promise<void>;
   botUserId: string;
   dispatch: DispatchFn;
   installId: string;
@@ -314,6 +316,7 @@ export class SlackPoller {
     }
     await store.completeReceipt(claim.receipt);
     summary.dispatched += 1;
+    await this.deps.onReceiptRecorded?.(qualified).catch(() => undefined);
     this.log(`recorded slack message ${qualified.channel}/${qualified.ts} for workflow`);
     await this.watchThread(qualified.channel, qualified.threadTs, qualified.ts);
     return true;

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import axios from 'axios';
 import type { WebClient } from '@slack/web-api';
-import { APP_NAME } from '../../agent/constants';
+import { APP_NAME, THINKING_REACTION } from '../../agent/constants';
 import type { DevRevClient } from '../../clients/devrev';
 import { keyPrefix, resolveStateViewer, STATE_LEAF_TYPE, type StateViewer } from '../../poller/state';
 
@@ -465,7 +465,7 @@ const reply = async (
     message_id: r.record_id,
     ...(r.outcome === 'ok' && r.posted ? { summary: `Reply sent (${route} route).` } : {}),
   });
-  if (i.message_ts?.trim()) return tag(await manageSlackResponse('send', i, api, deps, member), 'receipt');
+  if (i.message_ts?.trim()) return tag(await dispatchAction('send', i, api, deps, member), 'receipt');
   const call = i.skill_call_id?.trim();
   if (!i.thread_ts?.trim()) return output('error', 'A reply without message_ts needs thread_ts.');
   if (!call || call === 'unknown') return output('error', 'A reply without message_ts needs a trusted skill call id.');
@@ -478,7 +478,7 @@ const reply = async (
   return tag(r, 'thread');
 };
 
-export const manageSlackResponse = async (
+const dispatchAction = async (
   action: SlackResponseAction,
   original: ManageSlackResponseInput,
   api: DevRevClient,
@@ -629,4 +629,35 @@ export const manageSlackResponse = async (
     return output('error', 'The workflow ended with an explicit error record. No automatic retry was made.', row);
   }
   return output('error', 'Unsupported reply-record action.');
+};
+
+// The poller adds THINKING_REACTION to the incoming message when it records a workflow receipt.
+// Remove it once the reply is confirmed, or when the run ends with finalize or fail. Best effort:
+// a missing reaction or a Slack error never changes the recorded outcome.
+const clearThinkingReaction = async (
+  action: SlackResponseAction,
+  i: ManageSlackResponseInput,
+  result: ManageSlackResponseOutput,
+  deps: SlackSendDeps
+): Promise<void> => {
+  const ended = action === 'finalize' || action === 'fail';
+  const confirmed = (action === 'send' || action === 'reply' || action === 'reconcile') && result.posted;
+  if (!(ended || confirmed) || !i.channel || !i.message_ts || !/^[0-9]+\.[0-9]+$/.test(i.message_ts)) return;
+  try {
+    await deps.slack.reactions.remove({ channel: i.channel, name: THINKING_REACTION, timestamp: i.message_ts });
+  } catch {
+    // Reaction already gone, scope missing, or Slack unavailable.
+  }
+};
+
+export const manageSlackResponse = async (
+  action: SlackResponseAction,
+  original: ManageSlackResponseInput,
+  api: DevRevClient,
+  deps: SlackSendDeps,
+  member: string | undefined
+): Promise<ManageSlackResponseOutput> => {
+  const result = await dispatchAction(action, original, api, deps, member);
+  await clearThinkingReaction(action, original, result, deps);
+  return result;
 };

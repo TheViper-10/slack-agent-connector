@@ -593,3 +593,87 @@ describe('manageSlackResponse reply action', () => {
     expect(f.posted).toBe(false);
   });
 });
+
+describe('manageSlackResponse thinking reaction', () => {
+  const reactSlack = (ts: string, remove = jest.fn(async () => ({ ok: true }))) =>
+    ({
+      auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) },
+      chat: { postMessage: jest.fn(async () => ({ ok: true, ts })) },
+      conversations: {
+        history: jest.fn(async () => ({ messages: [], ok: true })),
+        replies: jest.fn(async () => ({ messages: [], ok: true })),
+      },
+      reactions: { remove },
+    }) as unknown as WebClient;
+  const removed = (slack: WebClient) => (slack.reactions.remove as jest.Mock).mock.calls.map(([a]) => a);
+
+  it('removes the reaction from the incoming message once a send is confirmed', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'hi');
+    const slack = reactSlack('1700000009.000900');
+    const r = await manageSlackResponse(
+      'send',
+      input({ workflow_mode: 'workflow', text: 'Done.' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(r.posted).toBe(true);
+    expect(removed(slack)).toEqual([{ channel: CHANNEL, name: 'hourglass_flowing_sand', timestamp: MESSAGE_TS }]);
+  });
+
+  it('removes it for reply with message_ts, finalize and fail, but not for prepare or an unposted send', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'hi');
+    const slack = reactSlack('1700000009.000900');
+    await manageSlackResponse('prepare', input(), api.client(), { slack }, 'dev-1');
+    await manageSlackResponse('send', input({ text: '' }), api.client(), { slack }, 'dev-1');
+    expect(removed(slack)).toHaveLength(0);
+    await manageSlackResponse(
+      'reply',
+      input({ workflow_mode: 'workflow', skill_call_id: 'c1', text: 'Hi.' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(removed(slack)).toHaveLength(1);
+    await manageSlackResponse('finalize', input(), api.client(), { slack }, 'dev-1');
+    await manageSlackResponse('fail', input({ response_event: 'other' }), api.client(), { slack }, 'dev-1');
+    expect(removed(slack)).toHaveLength(3);
+  });
+
+  it('never touches reactions for a thread reply without message_ts', async () => {
+    const api = new FakeApi();
+    const slack = reactSlack('1700000005.000500');
+    await manageSlackResponse(
+      'reply',
+      input({ message_ts: undefined, thread_ts: '1700000001.000100', skill_call_id: 'c1', text: 'Hi.' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(removed(slack)).toHaveLength(0);
+  });
+
+  it('a failing or missing reactions.remove never changes the recorded outcome', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'hi');
+    const failing = reactSlack(
+      '1700000009.000900',
+      jest.fn(async () => {
+        throw new Error('missing_scope');
+      })
+    );
+    const r = await manageSlackResponse(
+      'send',
+      input({ workflow_mode: 'workflow', text: 'Done.' }),
+      api.client(),
+      { slack: failing },
+      'dev-1'
+    );
+    expect(r).toMatchObject({ outcome: 'ok', posted: true });
+    const noReactions = { ...reactSlack('1.0'), reactions: undefined } as unknown as WebClient;
+    const f = await manageSlackResponse('finalize', input(), api.client(), { slack: noReactions }, 'dev-1');
+    expect(f.outcome).toBe('ok');
+  });
+});

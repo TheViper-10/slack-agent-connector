@@ -667,6 +667,35 @@ describe('workflow invoke mode and channel allowlist', () => {
     expect(env.store.receipts.get(key)?.dmObject).toBeUndefined();
   });
 
+  it('calls onReceiptRecorded once per new receipt, and a failing hook does not block the receipt', async () => {
+    const chs = channels();
+    const env = setup(chs);
+    env.deps.buildReceiptPayload = jest.fn(async () => ({ sender: 'U1', text: 'x' }));
+    const onReceiptRecorded = jest.fn(async () => {
+      throw new Error('reactions.add failed');
+    });
+    env.deps.onReceiptRecorded = onReceiptRecorded;
+    await env.poller().tick();
+    chs[0]!.messages.push({ text: `${MENTION} react to me`, ts: ts(5), user: 'U1' });
+    env.clock.now = T0 + 60_000;
+    const summary = await env.poller().tick();
+    expect(summary.dispatched).toBe(1);
+    expect(onReceiptRecorded).toHaveBeenCalledTimes(1);
+    expect(onReceiptRecorded).toHaveBeenCalledWith(expect.objectContaining({ channel: 'C1', ts: ts(5) }));
+    expect(env.store.receipts.get(receiptKey('inst-1', 'C1', ts(5)))?.status).toBe('done');
+    env.store.states.delete(channelKey('inst-1', 'C1'));
+    env.store.states.set(channelKey('inst-1', 'C1'), {
+      channel: 'C1',
+      id: 'sx',
+      kind: 'channel',
+      lastTs: ts(0),
+      uniqueKey: channelKey('inst-1', 'C1'),
+    });
+    env.clock.now = T0 + 120_000;
+    await env.poller().tick();
+    expect(onReceiptRecorded).toHaveBeenCalledTimes(1);
+  });
+
   it('does not create a second receipt when the message is seen again', async () => {
     const chs = channels();
     const env = setup(chs);
