@@ -13,6 +13,7 @@ export type SlackResponseAction =
   | 'record_triage'
   | 'send'
   | 'post_root'
+  | 'reply'
   | 'reconcile'
   | 'get'
   | 'finalize'
@@ -42,6 +43,8 @@ export interface ManageSlackResponseOutput {
   posted: boolean;
   record_id?: string;
   slack_ts?: string;
+  message_id?: string;
+  route?: 'receipt' | 'thread';
   summary: string;
 }
 export interface SlackSendDeps {
@@ -243,7 +246,7 @@ const triageData = async (api: DevRevClient, i: ManageSlackResponseInput): Promi
     job_id: i.job_id || 'no-job',
     no_job: !i.job_id,
     // Replying about a job does not choose or replace its working session.
-    acting_session: i.job_id ? (i.acting_session || 'unknown') : (i.agent_session_id ?? 'unknown'),
+    acting_session: i.job_id ? i.acting_session || 'unknown' : (i.agent_session_id ?? 'unknown'),
   };
 };
 
@@ -326,12 +329,12 @@ const reconcileRoot = async (
     const bot = (await deps.slack.auth.test()).user_id;
     if (!bot) return output('unknown', 'Slack identity could not be read.', intent);
     do {
-      const p = await deps.slack.conversations.history({
-        channel: i.channel as string,
-        cursor,
-        limit: 200,
-        include_all_metadata: true,
-      });
+      // A post inside a Thread is listed by conversations.replies; channel history shows only top-level posts.
+      const page = { channel: i.channel as string, cursor, limit: 200, include_all_metadata: true };
+      const threadTs = typeof intent.data.thread_ts === 'string' ? intent.data.thread_ts : '';
+      const p = threadTs
+        ? await deps.slack.conversations.replies({ ...page, ts: threadTs })
+        : await deps.slack.conversations.history(page);
       if (!p.ok) return output('unknown', 'Slack history could not be read.', intent);
       for (const m of p.messages ?? []) {
         const meta = m.metadata as { event_type?: string; event_payload?: Record<string, unknown> } | undefined;
@@ -447,6 +450,34 @@ const postRoot = async (
   return output('ok', 'Root post sent and confirmed.', c);
 };
 
+// One reply action for Tony. With message_ts it is the existing send (receipt required, keyed by message_ts).
+// Without message_ts it posts into thread_ts through the root-post code and records the reply under
+// reply:<thread_ts>:<skill_call_id>; no receipt is read or written.
+const reply = async (
+  i: ManageSlackResponseInput,
+  api: DevRevClient,
+  deps: SlackSendDeps,
+  member: string | undefined
+): Promise<ManageSlackResponseOutput> => {
+  const tag = (r: ManageSlackResponseOutput, route: 'receipt' | 'thread'): ManageSlackResponseOutput => ({
+    ...r,
+    route,
+    message_id: r.record_id,
+    ...(r.outcome === 'ok' && r.posted ? { summary: `Reply sent (${route} route).` } : {}),
+  });
+  if (i.message_ts?.trim()) return tag(await manageSlackResponse('send', i, api, deps, member), 'receipt');
+  const call = i.skill_call_id?.trim();
+  if (!i.thread_ts?.trim()) return output('error', 'A reply without message_ts needs thread_ts.');
+  if (!call || call === 'unknown') return output('error', 'A reply without message_ts needs a trusted skill call id.');
+  const r = await postRoot(
+    { ...i, message_ts: undefined, response_event: `reply:${i.thread_ts}:${call}` },
+    api,
+    deps,
+    member
+  );
+  return tag(r, 'thread');
+};
+
 export const manageSlackResponse = async (
   action: SlackResponseAction,
   original: ManageSlackResponseInput,
@@ -455,6 +486,7 @@ export const manageSlackResponse = async (
   member: string | undefined
 ): Promise<ManageSlackResponseOutput> => {
   if (action === 'post_root') return postRoot(original, api, deps, member);
+  if (action === 'reply') return reply(original, api, deps, member);
   const i = { ...original, response_event: original.response_event || 'initial' };
   if (!i.install || !i.channel || !i.message_ts || !/^[0-9]+\.[0-9]+$/.test(i.message_ts))
     return output('error', 'An exact incoming message and destination are required.');

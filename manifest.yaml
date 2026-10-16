@@ -230,20 +230,20 @@ operations:
           ui: { is_hidden: true }
         - name: action
           field_type: enum
-          allowed_values: [prepare, record_triage, send, post_root, reconcile, get, finalize, fail]
+          allowed_values: [prepare, record_triage, send, post_root, reply, reconcile, get, finalize, fail]
           is_required: true
-          description: Response-tracking step to perform. post_root sends a top-level message to channel with no incoming message; it needs response_event as its unique key.
+          description: Response-tracking step to perform. post_root sends a top-level message to channel with no incoming message; it needs response_event as its unique key. reply is the one reply action. With message_ts it runs send, and without message_ts it posts into thread_ts as a reply and needs thread_ts.
         - name: channel
           field_type: text
           is_required: true
           description: Slack channel ID of the tracked message.
         - name: message_ts
           field_type: text
-          is_required: true
-          description: Slack ts of the incoming message this response answers.
+          is_required: false
+          description: Slack ts of the incoming message this response answers. Give it only when a received message gave it to you; leave it empty to reply into a Thread.
         - name: thread_ts
           field_type: text
-          description: Slack thread_ts of the incoming message, when it is a reply.
+          description: Slack thread_ts of the incoming message, when it is a reply. Required for reply without message_ts, where it names the Thread to post into.
         - name: receipt_id
           field_type: text
           description: Original intake receipt ID; validated to match channel/message/thread/install on the initial send.
@@ -298,6 +298,12 @@ operations:
         - name: record_id
           field_type: text
           description: Tracked response record ID.
+        - name: message_id
+          field_type: text
+          description: Tracked reply record ID, set by reply. Same value as record_id.
+        - name: route
+          field_type: text
+          description: Set by reply. receipt when message_ts was given, thread when the reply went into thread_ts.
         - name: summary
           field_type: text
           description: Short human-readable outcome summary. Full detail is in the JSON body.

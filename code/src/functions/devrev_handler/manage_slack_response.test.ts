@@ -227,7 +227,7 @@ describe('manageSlackResponse post_root', () => {
     const slack = { ...rootSlack('1.0'), chat: { postMessage } } as unknown as WebClient;
     const first = await manageSlackResponse(
       'post_root',
-      input({ ...ROOT, workflow_mode: 'workflow' }),
+      input({ ...ROOT, message_ts: undefined, thread_ts: undefined, workflow_mode: 'workflow' }),
       api.client(),
       { slack },
       'dev-1'
@@ -252,7 +252,7 @@ describe('manageSlackResponse post_root', () => {
     const recon = { ...rootSlack('1.0'), conversations: { history } } as unknown as WebClient;
     const second = await manageSlackResponse(
       'post_root',
-      input({ ...ROOT, workflow_mode: 'workflow' }),
+      input({ ...ROOT, message_ts: undefined, thread_ts: undefined, workflow_mode: 'workflow' }),
       api.client(),
       { slack: recon },
       'dev-1'
@@ -432,5 +432,164 @@ describe('manageSlackResponse smoke (current immutable-stage implementation)', (
     expect(result.outcome).toBe('ok');
     expect(result.posted).toBe(false);
     expect(api.rows().some((r) => r.unique_key.endsWith(':intent'))).toBe(false);
+  });
+});
+
+describe('manageSlackResponse reply action', () => {
+  const THREAD = '1700000001.000100';
+  const REPLY = { message_ts: undefined, thread_ts: THREAD, skill_call_id: 'call-1', text: 'Following up.' };
+  const threadSlack = (ts: string): WebClient =>
+    ({
+      auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) },
+      chat: { postMessage: jest.fn(async () => ({ ok: true, ts })) },
+      conversations: {
+        history: jest.fn(async () => ({ messages: [], ok: true })),
+        replies: jest.fn(async () => ({ messages: [], ok: true })),
+      },
+    }) as unknown as WebClient;
+  const receiptReads = (api: FakeApi): number =>
+    api.post.mock.calls.filter(
+      ([path, body]) =>
+        path === 'custom-objects.get' && String((body as { unique_key?: string }).unique_key).includes(':receipt:')
+    ).length;
+  const rootRows = (api: FakeApi) => api.rows().filter((r) => r.unique_key.includes(':root:'));
+
+  it('posts into the thread, records under a root key, reads no receipt', async () => {
+    const api = new FakeApi();
+    const slack = threadSlack('1700000005.000500');
+    const r = await manageSlackResponse('reply', input(REPLY), api.client(), { slack }, 'dev-1');
+    expect(r).toMatchObject({
+      outcome: 'ok',
+      posted: true,
+      slack_ts: '1700000005.000500',
+      route: 'thread',
+      summary: 'Reply sent (thread route).',
+    });
+    expect(r.message_id).toBeTruthy();
+    expect(slack.chat.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: CHANNEL, thread_ts: THREAD })
+    );
+    expect(receiptReads(api)).toBe(0);
+    expect(rootRows(api).map((x) => x.unique_key)).toEqual(
+      expect.arrayContaining([expect.stringContaining(`:root:${CHANNEL}:reply:${THREAD}:call-1:confirmed`)])
+    );
+    expect(api.rows().some((x) => x.unique_key.includes(':response:'))).toBe(false);
+  });
+
+  it('a repeat with the same skill_call_id does not repost', async () => {
+    const api = new FakeApi();
+    const slack = threadSlack('1700000005.000500');
+    await manageSlackResponse('reply', input(REPLY), api.client(), { slack }, 'dev-1');
+    const again = await manageSlackResponse('reply', input(REPLY), api.client(), { slack }, 'dev-1');
+    expect(again.posted).toBe(true);
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('a different skill_call_id in the same thread posts again', async () => {
+    const api = new FakeApi();
+    const slack = threadSlack('1700000005.000500');
+    await manageSlackResponse('reply', input(REPLY), api.client(), { slack }, 'dev-1');
+    const second = await manageSlackResponse(
+      'reply',
+      input({ ...REPLY, skill_call_id: 'call-2', text: 'Second.' }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(second.outcome).toBe('ok');
+    expect(slack.chat.postMessage).toHaveBeenCalledTimes(2);
+    expect(second.summary).toBe('Reply sent (thread route).');
+  });
+
+  it('a timeout then reconcile finds the reply via conversations.replies (with paging), never reposts, never reads history', async () => {
+    const api = new FakeApi();
+    const postMessage = jest.fn(async () => {
+      throw new Error('socket timeout');
+    });
+    const first = await manageSlackResponse(
+      'reply',
+      input(REPLY),
+      api.client(),
+      { slack: { ...threadSlack('1.0'), chat: { postMessage } } as unknown as WebClient },
+      'dev-1'
+    );
+    expect(first.outcome).toBe('unknown');
+    const intent = JSON.parse(
+      String(api.rows().find((r) => r.unique_key.endsWith(':intent'))?.custom_fields[FIELD('status')])
+    );
+    const hit = {
+      metadata: {
+        event_payload: { attempt_id: intent.attempt_id, response_key: intent.response_key },
+        event_type: 'slack_workflow_response',
+      },
+      ts: '1700000007.000700',
+      user: 'BOT1',
+    };
+    const replies = jest
+      .fn()
+      .mockResolvedValueOnce({
+        messages: [{ ts: THREAD, user: 'U1' }],
+        ok: true,
+        response_metadata: { next_cursor: 'c2' },
+      })
+      .mockResolvedValueOnce({ messages: [hit], ok: true });
+    const history = jest.fn(async () => ({ messages: [], ok: true }));
+    const slack = {
+      ...threadSlack('1.0'),
+      chat: { postMessage },
+      conversations: { history, replies },
+    } as unknown as WebClient;
+    const second = await manageSlackResponse('reply', input(REPLY), api.client(), { slack }, 'dev-1');
+    expect(second).toMatchObject({ outcome: 'ok', posted: true, slack_ts: '1700000007.000700' });
+    expect(replies).toHaveBeenCalledTimes(2);
+    expect(replies.mock.calls[0][0]).toMatchObject({ channel: CHANNEL, ts: THREAD });
+    expect(history).not.toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('is refused without thread_ts or without a trusted skill_call_id', async () => {
+    const api = new FakeApi();
+    const slack = threadSlack('1.000001');
+    for (const o of [
+      { ...REPLY, thread_ts: undefined },
+      { ...REPLY, skill_call_id: undefined },
+      { ...REPLY, skill_call_id: 'unknown' },
+    ]) {
+      const r = await manageSlackResponse('reply', input(o), api.client(), { slack }, 'dev-1');
+      expect(r.outcome).toBe('error');
+    }
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
+    expect(api.rows()).toHaveLength(0);
+  });
+
+  it('with message_ts and no receipt still fails original_receipt_not_found and posts nothing', async () => {
+    const api = new FakeApi();
+    const slack = threadSlack('1.000001');
+    await expect(
+      manageSlackResponse('reply', input({ skill_call_id: 'call-1' }), api.client(), { slack }, 'dev-1')
+    ).rejects.toThrow('original_receipt_not_found');
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('send with message_ts and a receipt is unchanged: response key, receipt read, finalize sees it', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'hi');
+    const slack = threadSlack('1700000009.000900');
+    const r = await manageSlackResponse('reply', input({ skill_call_id: 'call-1' }), api.client(), { slack }, 'dev-1');
+    expect(r).toMatchObject({ posted: true, route: 'receipt' });
+    expect(rootRows(api)).toHaveLength(0);
+    const f = await manageSlackResponse('finalize', input(), api.client(), { slack }, 'dev-1');
+    expect(f).toMatchObject({ outcome: 'ok', posted: true });
+  });
+
+  it('a reply under a root key is invisible to message_ts-keyed get/finalize (documented limit)', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'hi');
+    const slack = threadSlack('1700000005.000500');
+    await manageSlackResponse('reply', input(REPLY), api.client(), { slack }, 'dev-1');
+    const g = await manageSlackResponse('get', input(), api.client(), { slack }, 'dev-1');
+    expect(g.outcome).toBe('unknown');
+    const f = await manageSlackResponse('finalize', input(), api.client(), { slack }, 'dev-1');
+    expect(f.posted).toBe(false);
   });
 });
