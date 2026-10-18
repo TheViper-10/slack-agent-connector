@@ -34,6 +34,14 @@ const describeIfEncoderAvailable = OperationOutput ? describe : describe.skip;
 
 jest.mock('@slack/web-api', () => ({ WebClient: jest.fn(() => ({})) }));
 jest.mock('../slack_poller', () => ({ __esModule: true, default: jest.fn(async () => undefined) }));
+// snap-ins.get resolves the install inputs, including the hook-written bot user id the guard compares against.
+jest.mock('../../clients/devrev', () => ({
+  DevRevClient: jest.fn(() => ({
+    post: jest.fn(async () => ({
+      snap_in: { inputs_values: { invoke_mode: 'workflow', act_as_user_id: 'test-user', slack_bot_user_id: 'UBOT' } },
+    })),
+  })),
+}));
 jest.mock('./manage_slack_response', () => ({ manageSlackResponse: jest.fn() }));
 const event = (): FunctionEvent => ({
   context: { dev_oid: 'test-org', snap_in_id: 'test-install', secrets: { service_account_token: 'test-token' } },
@@ -46,7 +54,7 @@ beforeEach(() => jest.clearAllMocks());
 it('reads native operation inputs from payload.data and returns native output values, never a hook envelope', async () => {
   jest.mocked(manageSlackResponse).mockResolvedValue({ outcome: 'ok', posted: false, record_id: 'record-test', summary: 'Request recorded.' });
   const result = await run([event()]);
-  expect(manageSlackResponse).toHaveBeenCalledWith('prepare', expect.objectContaining({ channel: 'C1', receipt_id: 'receipt-test' }), expect.anything(), expect.anything(), 'test-user');
+  expect(manageSlackResponse).toHaveBeenCalledWith('prepare', expect.objectContaining({ channel: 'C1', receipt_id: 'receipt-test', expected_bot_user_id: 'UBOT' }), expect.anything(), expect.anything(), 'test-user');
   expect(result).toEqual({
     output: { values: [expect.objectContaining({ outcome: 'ok', record_id: 'record-test' })] },
     summary: 'Request recorded.',

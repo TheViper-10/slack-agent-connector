@@ -68,6 +68,7 @@ export const handleManageSlackResponse = async (event: FunctionEvent): Promise<W
     install,
     workflow_mode: globals['invoke_mode'],
     agent_id: globals['agent_id'],
+    expected_bot_user_id: globals['slack_bot_user_id'],
     acting_session: data['acting_session'] as string | undefined,
     agent_session_id: data['agent_session_id'] as string | undefined,
     channel: data['channel'] as string | undefined,

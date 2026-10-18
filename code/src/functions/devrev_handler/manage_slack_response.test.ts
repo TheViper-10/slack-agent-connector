@@ -114,7 +114,10 @@ class FakeApi {
 }
 
 const okSlack = (ts: string): WebClient =>
-  ({ chat: { postMessage: jest.fn(async () => ({ ok: true, ts })) } }) as unknown as WebClient;
+  ({
+    auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) },
+    chat: { postMessage: jest.fn(async () => ({ ok: true, ts })) },
+  }) as unknown as WebClient;
 const historySlack = (attemptId: string, responseKey: string, ts: string): WebClient =>
   ({
     auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) },
@@ -138,6 +141,7 @@ const historySlack = (attemptId: string, responseKey: string, ts: string): WebCl
 const input = (overrides: Partial<Record<string, unknown>> = {}) => ({
   channel: CHANNEL,
   decision: 'answer the contact question directly',
+  expected_bot_user_id: 'BOT1',
   install: INSTALL,
   message_ts: MESSAGE_TS,
   rationale: 'no job needed; this is a contact-only question',
@@ -145,6 +149,40 @@ const input = (overrides: Partial<Record<string, unknown>> = {}) => ({
   thread_ts: MESSAGE_TS,
   workflow_mode: 'workflow',
   ...overrides,
+});
+
+describe('manageSlackResponse bot identity guard', () => {
+  it('blocks send, post_root and reply when the token posts as another bot or the install has no bot id, and posts nothing', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'hello');
+    const slack = okSlack('1700000009.000900');
+    const other = input({ expected_bot_user_id: 'BOT2' });
+    const root = { response_event: 'ticket-9', message_ts: undefined, thread_ts: undefined };
+    const send = await manageSlackResponse('send', other, api.client(), { slack }, 'dev-1');
+    expect(send).toMatchObject({ outcome: 'blocked', posted: false });
+    expect(send.summary).toContain(`bot_identity_mismatch: token posts as BOT1, install ${INSTALL} expects BOT2`);
+    const posted = await manageSlackResponse('post_root', { ...other, ...root }, api.client(), { slack }, 'dev-1');
+    expect(posted.outcome).toBe('blocked');
+    const replied = await manageSlackResponse(
+      'reply',
+      { ...other, thread_ts: MESSAGE_TS, message_ts: undefined, skill_call_id: 'call-1' },
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(replied.outcome).toBe('blocked');
+    const unrecorded = await manageSlackResponse(
+      'send',
+      input({ expected_bot_user_id: undefined }),
+      api.client(),
+      { slack },
+      'dev-1'
+    );
+    expect(unrecorded).toMatchObject({ outcome: 'blocked', posted: false });
+    expect(unrecorded.summary).toContain('bot_identity_unrecorded');
+    expect(slack.chat.postMessage).not.toHaveBeenCalled();
+    expect(api.rows()).toHaveLength(1);
+  });
 });
 
 describe('manageSlackResponse post_root', () => {
@@ -346,6 +384,7 @@ describe('manageSlackResponse smoke (current immutable-stage implementation)', (
     api.seedReceipt(CHANNEL, MESSAGE_TS, 'hello');
     const timeout = Object.assign(new Error('timeout'), { isAxiosError: true, code: 'ECONNABORTED' });
     const timingOutSlack = {
+      auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) },
       chat: {
         postMessage: jest.fn(async () => {
           throw timeout;

@@ -37,6 +37,8 @@ export interface ManageSlackResponseInput {
   text?: string;
   error_code?: string;
   workflow_mode?: string;
+  // The install's recorded Slack bot user id (hook-written slack_bot_user_id input).
+  expected_bot_user_id?: string;
 }
 export interface ManageSlackResponseOutput {
   outcome: 'ok' | 'blocked' | 'unknown' | 'error';
@@ -650,6 +652,37 @@ const clearThinkingReaction = async (
   }
 };
 
+// Fail closed before any post: the token in use must be the bot this install recorded at activation.
+// This keeps an operation caller's keyring and snap_in_id consistent. Nothing is posted or recorded on a mismatch.
+const botIdentityGuard = async (
+  i: ManageSlackResponseInput,
+  deps: SlackSendDeps
+): Promise<ManageSlackResponseOutput | undefined> => {
+  const expected = i.expected_bot_user_id?.trim();
+  if (!expected)
+    return output(
+      'blocked',
+      `bot_identity_unrecorded: install ${i.install} has no recorded Slack bot user id; nothing was posted.`
+    );
+  let actual: string | undefined;
+  try {
+    actual = (await deps.slack.auth.test()).user_id;
+  } catch {
+    return output(
+      'blocked',
+      'bot_identity_unverified: Slack auth.test failed for the token in use; nothing was posted.'
+    );
+  }
+  if (!actual)
+    return output('blocked', 'bot_identity_unverified: Slack auth.test returned no user id; nothing was posted.');
+  if (actual !== expected)
+    return output(
+      'blocked',
+      `bot_identity_mismatch: token posts as ${actual}, install ${i.install} expects ${expected}; nothing was posted.`
+    );
+  return undefined;
+};
+
 export const manageSlackResponse = async (
   action: SlackResponseAction,
   original: ManageSlackResponseInput,
@@ -657,6 +690,10 @@ export const manageSlackResponse = async (
   deps: SlackSendDeps,
   member: string | undefined
 ): Promise<ManageSlackResponseOutput> => {
+  if (action === 'send' || action === 'post_root' || action === 'reply') {
+    const blocked = await botIdentityGuard(original, deps);
+    if (blocked) return blocked;
+  }
   const result = await dispatchAction(action, original, api, deps, member);
   await clearThinkingReaction(action, original, result, deps);
   return result;
