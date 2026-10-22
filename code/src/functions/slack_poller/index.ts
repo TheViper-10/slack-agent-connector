@@ -2,7 +2,6 @@ import { WebClient } from '@slack/web-api';
 import axios from 'axios';
 
 import { formatDevRevError, redactSecrets } from '../../agent/errors';
-import { THINKING_REACTION } from '../../agent/constants';
 import { invokeAgentFromSlack } from '../../agent/invoke';
 import { DevRevClient } from '../../clients/devrev';
 import {
@@ -116,11 +115,8 @@ export const handleEvent = async (event: FunctionEvent): Promise<TickSummary | u
     botUserId,
     ...(workflowMode
       ? {
+          // Workflow mode adds no reaction: every mark in Slack is the agent's own reply or reaction.
           buildReceiptPayload: buildReceiptPayloadFor(slack),
-          // The reply path removes this reaction; agent mode sets and clears it in invoke.ts and reply.ts.
-          onReceiptRecorded: async (message: { channel: string; ts: string }) => {
-            await slack.reactions.add({ channel: message.channel, name: THINKING_REACTION, timestamp: message.ts });
-          },
         }
       : {}),
     dispatch: (message, onDmResolved) =>

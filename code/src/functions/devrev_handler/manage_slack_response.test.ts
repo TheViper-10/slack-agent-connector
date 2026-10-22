@@ -716,3 +716,35 @@ describe('manageSlackResponse thinking reaction', () => {
     expect(f.outcome).toBe('ok');
   });
 });
+
+describe('manageSlackResponse react', () => {
+  const slackWith = (add: jest.Mock): WebClient =>
+    ({ auth: { test: jest.fn(async () => ({ user_id: 'BOT1' })) }, reactions: { add } }) as unknown as WebClient;
+
+  it('adds the reaction to a recorded message, strips colons and returns the Slack error for a bad name', async () => {
+    const api = new FakeApi();
+    api.seedReceipt(CHANNEL, MESSAGE_TS, 'thanks');
+    const add = jest.fn(async () => ({ ok: true }));
+    const r = await manageSlackResponse(
+      'react',
+      input({ emoji: ':white_check_mark:' }),
+      api.client(),
+      { slack: slackWith(add) },
+      'dev-1'
+    );
+    expect(r).toMatchObject({ outcome: 'ok', posted: false });
+    expect(add).toHaveBeenCalledWith({ channel: CHANNEL, name: 'white_check_mark', timestamp: MESSAGE_TS });
+    const bad = jest.fn(async () => {
+      throw Object.assign(new Error('x'), { data: { error: 'invalid_name' } });
+    });
+    const e = await manageSlackResponse(
+      'react',
+      input({ emoji: 'nope' }),
+      api.client(),
+      { slack: slackWith(bad) },
+      'dev-1'
+    );
+    expect(e).toMatchObject({ outcome: 'error' });
+    expect(e.summary).toContain('invalid_name');
+  });
+});

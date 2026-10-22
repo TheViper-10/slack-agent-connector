@@ -230,9 +230,9 @@ operations:
           ui: { is_hidden: true }
         - name: action
           field_type: enum
-          allowed_values: [prepare, record_triage, send, post_root, reply, reconcile, get, finalize, fail]
+          allowed_values: [prepare, record_triage, send, post_root, reply, react, reconcile, get, finalize, fail]
           is_required: true
-          description: Response-tracking step to perform. post_root sends a top-level message to channel with no incoming message; it needs response_event as its unique key. reply is the one reply action. With message_ts it runs send, and without message_ts it posts into thread_ts as a reply and needs thread_ts.
+          description: Response-tracking step to perform. post_root sends a top-level message to channel with no incoming message; it needs response_event as its unique key. reply is the one reply action. With message_ts it runs send, and without message_ts it posts into thread_ts as a reply and needs thread_ts. react adds one emoji reaction to the incoming message (message_ts, thread_ts and emoji); Slack rejects an invalid emoji name and the error is returned.
         - name: channel
           field_type: text
           is_required: true
@@ -281,6 +281,9 @@ operations:
         - name: text
           field_type: text
           description: Response text to send. Never logged or echoed back; prepare stores only a hash.
+        - name: emoji
+          field_type: text
+          description: Slack emoji name for react, such as thumbsup or white_check_mark. Colons are optional.
         - name: error_code
           field_type: text
           description: Explicit error code to record via fail.

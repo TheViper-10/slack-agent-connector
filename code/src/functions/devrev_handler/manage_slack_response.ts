@@ -14,6 +14,7 @@ export type SlackResponseAction =
   | 'send'
   | 'post_root'
   | 'reply'
+  | 'react'
   | 'reconcile'
   | 'get'
   | 'finalize'
@@ -35,6 +36,8 @@ export interface ManageSlackResponseInput {
   job_id?: string;
   acting_session?: string;
   text?: string;
+  // Slack emoji name for react, with or without surrounding colons.
+  emoji?: string;
   error_code?: string;
   workflow_mode?: string;
   // The install's recorded Slack bot user id (hook-written slack_bot_user_id input).
@@ -480,6 +483,32 @@ const reply = async (
   return tag(r, 'thread');
 };
 
+// One reaction on a message the install recorded a receipt for. No intent fence or confirmation row: adding
+// the same reaction twice is harmless and Slack answers already_reacted, which counts as done.
+const react = async (
+  i: ManageSlackResponseInput,
+  api: DevRevClient,
+  deps: SlackSendDeps,
+  member: string | undefined
+): Promise<ManageSlackResponseOutput> => {
+  const emoji = i.emoji?.trim().replace(/^:|:$/g, '');
+  if (!emoji) return output('error', 'An emoji name is required.');
+  if (!i.install || !i.channel || !i.message_ts || !/^[0-9]+\.[0-9]+$/.test(i.message_ts))
+    return output('error', 'An exact incoming message and destination are required.');
+  const viewer = await resolveStateViewer(api, member);
+  if (!viewer?.stateRole)
+    return output('error', 'Protected reply records are not accessible to the configured operator.');
+  await receipt(new Store(api, viewer), i);
+  try {
+    await deps.slack.reactions.add({ channel: i.channel, name: emoji, timestamp: i.message_ts });
+  } catch (e) {
+    const code = (e as { data?: { error?: string } }).data?.error;
+    if (code === 'already_reacted') return output('ok', `Reaction :${emoji}: is already on the message.`);
+    return output('error', `Slack rejected the reaction: ${code || 'send_failed'}.`);
+  }
+  return output('ok', `Reacted with :${emoji}:.`);
+};
+
 const dispatchAction = async (
   action: SlackResponseAction,
   original: ManageSlackResponseInput,
@@ -489,6 +518,7 @@ const dispatchAction = async (
 ): Promise<ManageSlackResponseOutput> => {
   if (action === 'post_root') return postRoot(original, api, deps, member);
   if (action === 'reply') return reply(original, api, deps, member);
+  if (action === 'react') return react(original, api, deps, member);
   const i = { ...original, response_event: original.response_event || 'initial' };
   if (!i.install || !i.channel || !i.message_ts || !/^[0-9]+\.[0-9]+$/.test(i.message_ts))
     return output('error', 'An exact incoming message and destination are required.');
@@ -690,7 +720,7 @@ export const manageSlackResponse = async (
   deps: SlackSendDeps,
   member: string | undefined
 ): Promise<ManageSlackResponseOutput> => {
-  if (action === 'send' || action === 'post_root' || action === 'reply') {
+  if (action === 'send' || action === 'post_root' || action === 'reply' || action === 'react') {
     const blocked = await botIdentityGuard(original, deps);
     if (blocked) return blocked;
   }

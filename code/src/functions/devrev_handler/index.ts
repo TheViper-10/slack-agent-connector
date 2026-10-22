@@ -73,6 +73,7 @@ export const handleManageSlackResponse = async (event: FunctionEvent): Promise<W
     agent_session_id: data['agent_session_id'] as string | undefined,
     channel: data['channel'] as string | undefined,
     decision: data['decision'] as string | undefined,
+    emoji: data['emoji'] as string | undefined,
     error_code: data['error_code'] as string | undefined,
     job_id: data['job_id'] as string | undefined,
     message_ts: data['message_ts'] as string | undefined,
