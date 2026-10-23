@@ -546,6 +546,45 @@ describe('SlackPoller.tick', () => {
     expect(env.store.states.get(threadKey('inst-1', 'D1', ts(5)))?.lastTs).toBe(ts(80));
   });
 
+  it('records human replies beneath a bot-started DM root without a bot loop or changing human-started DMs', async () => {
+    const channels: FakeChannel[] = [
+      { id: 'D1', messages: [], replies: {}, type: 'im' },
+      { id: 'D2', messages: [], replies: {}, type: 'im' },
+    ];
+    const env = setup(channels);
+    env.deps.buildReceiptPayload = async (m) => ({ sender: m.message.user!, text: m.message.text! });
+    await env.poller().tick();
+
+    channels[0]!.messages.push({ bot_id: 'B1', text: 'Harry asks', ts: ts(5), user: BOT });
+    channels[1]!.messages.push({ text: 'Human asks', ts: ts(6), user: 'U1' });
+    env.clock.now = T0 + 60_000;
+    await env.poller().tick();
+    expect(env.store.states.get(threadKey('inst-1', 'D1', ts(5)))?.lastTs).toBe(ts(5));
+    expect(env.store.receipts.has(receiptKey('inst-1', 'D1', ts(5)))).toBe(false);
+    expect(env.store.receipts.get(receiptKey('inst-1', 'D2', ts(6)))?.status).toBe('done');
+
+    channels[0]!.replies![ts(5)] = [
+      { text: 'plain reply', thread_ts: ts(5), ts: ts(70), user: 'U1' },
+      { bot_id: 'B1', text: 'bot answer', thread_ts: ts(5), ts: ts(71), user: BOT },
+      { text: `${MENTION} tagged reply`, thread_ts: ts(5), ts: ts(72), user: 'U1' },
+    ];
+    channels[1]!.replies![ts(6)] = [{ text: 'human follow-up', thread_ts: ts(6), ts: ts(73), user: 'U1' }];
+    env.clock.now = T0 + 120_000;
+    await env.poller().tick();
+    env.clock.now = T0 + 180_000;
+    await env.poller().tick();
+
+    expect([...env.store.receipts.keys()].sort()).toEqual([
+      receiptKey('inst-1', 'D1', ts(70)),
+      receiptKey('inst-1', 'D1', ts(72)),
+      receiptKey('inst-1', 'D2', ts(6)),
+      receiptKey('inst-1', 'D2', ts(73)),
+    ].sort());
+    expect([...env.store.receipts.values()].every((receipt) => receipt.status === 'done')).toBe(true);
+    expect(env.store.states.get(threadKey('inst-1', 'D1', ts(5)))?.lastTs).toBe(ts(72));
+    expect(env.dispatch).not.toHaveBeenCalled();
+  });
+
   it('only dispatches channel thread replies that mention the bot', async () => {
     const channels: FakeChannel[] = [{ id: 'C1', messages: [], replies: {}, type: 'public_channel' }];
     const env = setup(channels);

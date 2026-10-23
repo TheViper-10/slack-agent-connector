@@ -352,6 +352,10 @@ export class SlackPoller {
         const threadTs = message.thread_ts ?? ts;
         const handled = await this.processMessage({ channel, isIm, message, threadTs, ts }, summary);
         if (!handled) break;
+      } else if (isIm && message.user === this.deps.botUserId && (!message.thread_ts || message.thread_ts === ts)) {
+        // A proactive bot DM has no inbound dispatch to start a watch. Follow its human replies without invoking the bot.
+        if (this.budgetExhausted()) break;
+        await this.watchThread(channel, ts, ts);
       }
       advanced = ts;
     }
