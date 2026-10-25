@@ -195,6 +195,7 @@ describe('qualifies', () => {
     expect(qualifies({ text: 'hi', ts: '1.1', user: BOT }, true, BOT)).toBe(false);
     expect(qualifies({ subtype: 'channel_join', text: 'joined', ts: '1.1', user: 'U1' }, true, BOT)).toBe(false);
     expect(qualifies({ subtype: 'file_share', text: 'see file', ts: '1.1', user: 'U1' }, true, BOT)).toBe(true);
+    expect(qualifies({ bot_id: 'B1', subtype: 'bot_message', text: `${MENTION} help`, ts: '1.2', user: 'U9' }, false, BOT)).toBe(true);
   });
 });
 
@@ -264,7 +265,7 @@ describe('SlackPoller.tick', () => {
     expect(env.fake.history).toHaveBeenCalledWith(expect.objectContaining({ channel: 'D1', oldest: ts(0) }));
   });
 
-  it('dispatches a human posting through an app token and skips bot authors, looking each user up once', async () => {
+  it('dispatches human app posts and explicitly tagged bot posts, looking each user up once', async () => {
     const channels: FakeChannel[] = [{ id: 'C1', messages: [], type: 'public_channel' }];
     const env = setup(channels);
     await env.poller().tick();
@@ -277,7 +278,7 @@ describe('SlackPoller.tick', () => {
     env.clock.now = T0 + 60_000;
     await env.poller().tick();
 
-    expect(env.dispatched.map((m) => m.ts)).toEqual([ts(10), ts(12)]);
+    expect(env.dispatched.map((m) => m.ts)).toEqual([ts(10), ts(11), ts(12)]);
     expect(env.fake.usersInfo).toHaveBeenCalledTimes(2);
     const payload = toEventPayload(env.dispatched[0]!);
     expect((payload['event'] as Record<string, unknown>)['bot_id']).toBeUndefined();
@@ -472,7 +473,7 @@ describe('SlackPoller.tick', () => {
       expect(env.dispatch).toHaveBeenCalledTimes(1);
     });
 
-    it('does not watch a thread whose new replies do not mention it, or mention it only from a bot', async () => {
+    it('does not watch a thread when neither a person nor another bot mentions it', async () => {
       const channel = sharedThread([otherBotReply]);
       const env = setup([channel]);
       await env.poller().tick();
@@ -480,7 +481,7 @@ describe('SlackPoller.tick', () => {
       addReplies(
         channel,
         { text: `<@${OTHER_BOT}> only you`, ts: ts(20), user: 'U2' },
-        { bot_id: 'BOTHER', text: `${MENTION} handing over`, ts: ts(21), user: OTHER_BOT }
+        { bot_id: 'BOTHER', text: 'unaddressed bot reply', ts: ts(21), user: OTHER_BOT }
       );
       env.clock.now = T0 + 60_000;
       await env.poller().tick();
@@ -759,7 +760,7 @@ describe('workflow invoke mode and channel allowlist', () => {
     expect(env.store.receipts.size).toBe(1);
   });
 
-  it('never records receipts for the bot own messages or other bots', async () => {
+  it('records a tagged other-bot message but not its own post', async () => {
     const chs = channels();
     const env = setup(chs);
     env.deps.buildReceiptPayload = jest.fn(async () => ({ sender: 'x', text: 'x' }));
@@ -769,7 +770,58 @@ describe('workflow invoke mode and channel allowlist', () => {
     chs[0]!.messages.push({ bot_id: 'B7', text: `${MENTION} human via user token`, ts: ts(7), user: 'U1' });
     env.clock.now = T0 + 60_000;
     await env.poller().tick();
-    expect([...env.store.receipts.keys()]).toEqual([receiptKey('inst-1', 'C1', ts(7))]);
+    expect([...env.store.receipts.keys()]).toEqual([receiptKey('inst-1', 'C1', ts(6)), receiptKey('inst-1', 'C1', ts(7))]);
+  });
+
+  it('records one receipt for a bot tagging it in another thread, but ignores untagged bot traffic', async () => {
+    const root = ts(-3000);
+    const chs: FakeChannel[] = [
+      {
+        id: 'C1',
+        messages: [{ bot_id: 'B9', text: 'other bot starts', ts: root, user: 'U9' }],
+        replies: { [root]: [] },
+        type: 'public_channel',
+      },
+      { id: 'D1', messages: [], type: 'im' },
+    ];
+    const env = setup(chs);
+    env.deps.buildReceiptPayload = async (m) => ({ sender: m.message.user!, text: m.message.text! });
+    await env.poller().tick();
+
+    chs[0]!.replies![root] = [
+      { bot_id: 'BOTHER', text: `${MENTION} handoff`, thread_ts: root, ts: ts(20), user: 'UOTHERBOT' },
+      { bot_id: 'B9', text: 'unaddressed reply', thread_ts: root, ts: ts(21), user: 'U9' },
+    ];
+    chs[0]!.messages[0]!.reply_count = 2;
+    chs[0]!.messages[0]!.latest_reply = ts(21);
+    chs[1]!.messages.push({ bot_id: 'BOTHER', text: 'unaddressed DM reply', ts: ts(22), user: 'UOTHERBOT' });
+    env.clock.now = T0 + 60_000;
+    await env.poller().tick();
+    env.clock.now = T0 + 120_000;
+    await env.poller().tick();
+
+    const key = receiptKey('inst-1', 'C1', ts(20));
+    expect([...env.store.receipts.keys()]).toEqual([key]);
+    expect(env.store.receipts.get(key)?.status).toBe('done');
+    expect(env.store.payloads.get(key)).toMatchObject({ sender: 'UOTHERBOT', text: `${MENTION} handoff` });
+    expect(env.store.states.get(threadKey('inst-1', 'C1', root))?.lastTs).toBe(ts(21));
+    expect(env.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('requires an explicit mention from another bot even in a DM', async () => {
+    const chs: FakeChannel[] = [{ id: 'D1', messages: [], type: 'im' }];
+    const env = setup(chs);
+    env.deps.buildReceiptPayload = async (m) => ({ sender: m.message.user!, text: m.message.text! });
+    await env.poller().tick();
+    chs[0]!.messages.push(
+      { bot_id: 'BOTHER', text: 'ordinary bot DM', ts: ts(5), user: 'UOTHERBOT' },
+      { bot_id: 'BOTHER', text: `${MENTION} direct handoff`, ts: ts(6), user: 'UOTHERBOT' },
+      { bot_id: 'BSELF', text: `${MENTION} my own reply`, ts: ts(7), user: BOT },
+      { subtype: 'bot_message', text: 'legacy bot DM', ts: ts(8), user: 'U9' }
+    );
+    env.clock.now = T0 + 60_000;
+    await env.poller().tick();
+    expect([...env.store.receipts.keys()]).toEqual([receiptKey('inst-1', 'D1', ts(6))]);
   });
 
   it('polls only allowlisted channels', async () => {

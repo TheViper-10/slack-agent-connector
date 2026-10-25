@@ -22,7 +22,7 @@ Activation validates that `agent_id` and `act_as_user_id` belong to the installe
 ## How it works
 
 1. A `timer-events` source fires every minute (`slack_poller`). It lists the bot's conversations (`users.conversations`, including IMs) and reads each with `conversations.history` from its stored cursor. There is no inbound webhook, relay route or public URL.
-2. For each qualifying message (any human DM, or an `@mention` of the bot elsewhere; bot messages are skipped), the snap-in mints an act-as token for `act_as_user_id`, finds or creates the DevRev DM for that Slack thread, and posts one executing comment (the request first, then the earlier thread messages as read-only context) that wakes the agent.
+2. A human DM or an explicit `@mention` from a person or another bot invokes the configured agent, or records an intake receipt in workflow mode. The connector ignores its own posts, system messages and untagged bot messages, including in DMs.
 3. The agent's reply is posted back to the Slack thread (`devrev_handler`).
 4. Threads the agent has answered are watched for 24 hours, so follow-ups reuse the same DevRev DM and the agent keeps prior context.
 

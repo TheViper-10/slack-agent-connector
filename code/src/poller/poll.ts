@@ -143,7 +143,7 @@ const slackErrorNeeded = (error: unknown): string | undefined =>
  */
 export const qualifies = (message: SlackHistoryMessage, isIm: boolean, botUserId: string): boolean => {
   if (!message.ts || !message.user || message.user === botUserId) return false;
-  if (message.subtype && message.subtype !== 'file_share' && message.subtype !== 'thread_broadcast') return false;
+  if (message.subtype && !['file_share', 'thread_broadcast', 'bot_message'].includes(message.subtype)) return false;
   const text = message.text?.trim() ?? '';
   if (isIm) return text.length > 0;
   const mention = `<@${botUserId}>`;
@@ -152,7 +152,7 @@ export const qualifies = (message: SlackHistoryMessage, isIm: boolean, botUserId
 
 /** Converts a polled message into the Slack Events API payload shape the existing invoke logic parses. */
 export const toEventPayload = (message: QualifiedMessage): Record<string, unknown> => {
-  // The author is already confirmed human; the parsers reject any bot_id.
+  // The poller checked the author; the event parsers reject any bot_id.
   const { bot_id: _botId, edited: _edited, subtype, ...rest } = message.message;
   return {
     event: {
@@ -185,8 +185,8 @@ export class SlackPoller {
   }
 
   /** A users.info failure throws so the channel cursor stays before this message and it is retried next tick. */
-  private async isHumanAuthor(message: SlackHistoryMessage): Promise<boolean> {
-    if (!message.bot_id) return true;
+  private async isAllowedAuthor(message: SlackHistoryMessage): Promise<boolean> {
+    if (!message.bot_id && message.subtype !== 'bot_message') return true;
     const userId = message.user!;
     let isBot = this.isBotUser.get(userId);
     if (isBot === undefined) {
@@ -194,7 +194,8 @@ export class SlackPoller {
       isBot = !!response.user?.is_bot || response.user?.id === 'USLACKBOT';
       this.isBotUser.set(userId, isBot);
     }
-    return !isBot;
+    // A bot must address this install explicitly, even in a DM; untagged replies cannot make bots echo each other.
+    return !isBot || qualifies(message, false, this.deps.botUserId);
   }
 
   async listConversations(summary: TickSummary): Promise<Conversation[]> {
@@ -347,7 +348,7 @@ export class SlackPoller {
     let advanced = cursor;
     for (const message of messages) {
       const ts = message.ts!;
-      if (qualifies(message, isIm, this.deps.botUserId) && (await this.isHumanAuthor(message))) {
+      if (qualifies(message, isIm, this.deps.botUserId) && (await this.isAllowedAuthor(message))) {
         if (this.budgetExhausted()) break;
         const threadTs = message.thread_ts ?? ts;
         const handled = await this.processMessage({ channel, isIm, message, threadTs, ts }, summary);
@@ -379,7 +380,7 @@ export class SlackPoller {
       const replies = await this.fetchReplies(channel, root.ts, sinceTs);
       let mentioned = false;
       for (const reply of replies) {
-        if (qualifies(reply, false, this.deps.botUserId) && (await this.isHumanAuthor(reply))) {
+        if (qualifies(reply, false, this.deps.botUserId) && (await this.isAllowedAuthor(reply))) {
           mentioned = true;
           break;
         }
