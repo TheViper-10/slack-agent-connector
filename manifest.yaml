@@ -137,6 +137,7 @@ keyrings:
     - name: slack_signing_secret
       display_name: Slack signing secret
       description: Optional. Signing secret of the Slack app this install connects. Required only to accept Slack Events API deliveries on the slack-events trigger URL; without it those deliveries are dropped and the poller handles every message.
+      optional: true
       types:
         - snap_in_secret
 
