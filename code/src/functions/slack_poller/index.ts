@@ -90,7 +90,8 @@ export const buildReceiptPayloadFor =
     };
   };
 
-export const handleEvent = async (event: FunctionEvent): Promise<TickSummary | undefined> => {
+/** Builds the poller (deps, receipt payload, dispatch) for one install; shared by the timer tick and Events API ingress. */
+export const createPoller = async (event: FunctionEvent): Promise<SlackPoller> => {
   const slackToken = getKeyring(event, 'slack_connection')?.secret;
   if (!slackToken) throw new Error('Slack connection is required');
   const botUserId = event.input_data.global_values?.['slack_bot_user_id'];
@@ -126,6 +127,11 @@ export const handleEvent = async (event: FunctionEvent): Promise<TickSummary | u
     slack,
     store: new DevRevStateStore(devrev, event.context.snap_in_id, viewer),
   });
+  return poller;
+};
+
+export const handleEvent = async (event: FunctionEvent): Promise<TickSummary | undefined> => {
+  const poller = await createPoller(event);
   const summary = await poller.tick();
   console.info(
     `slack poll tick: first_run=${summary.firstRun} channels=${summary.channels} threads=${summary.threads} ` +

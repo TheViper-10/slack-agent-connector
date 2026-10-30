@@ -50,7 +50,20 @@ Rules:
 - **Configured identity.** Every invocation acts as `act_as_user_id` through a per-request act-as token, never cached. There is no stored PAT. Slack users do not need DevRev accounts. If that user is deactivated, the connection stops working.
 - **Unified DM path.** Channel mentions and bot DMs both use the DM-with-agent path for durable history.
 - **Follow-up tracking.** The DM stores a `last_imported_ts` watermark; follow-ups import only newer Slack messages.
-- **Ingress is a poll.** Latency is up to about one minute and each tick has a 45-second budget. Ingress sits behind the `SlackPoller` interface so an Events API path could be added later.
+- **Ingress is a poll.** Latency is up to about one minute and each tick has a 45-second budget. The optional Events API ingress below delivers in seconds; the poller stays on as the safety net.
+
+## Events API ingress
+
+An optional second ingress delivers app mentions and DMs in seconds. It runs the same path as the poller (`SlackPoller.handleMessage`: qualification, author check, receipt claim, thread watch), so a message that arrives through both ingress paths is handled once. The `slack-events` source routes to the existing `devrev_handler` function (no extra function). The poller keeps running and covers anything the webhook drops or misses.
+
+Setup, once per install:
+
+1. In the Slack app's Event Subscriptions, enable events and set the Request URL to the install's `slack-events` trigger URL. The source answers Slack's `url_verification` challenge itself.
+2. Subscribe to the bot events `app_mention`, `message.im` and `message.mpim`, and add the `app_mentions:read` scope.
+3. Turn Socket Mode off, and turn on the App Home Messages tab so people can DM the app.
+4. Put the app's signing secret in the optional `slack_signing_secret` keyring. Without it every delivery is logged and dropped.
+
+The handler verifies the v0 HMAC-SHA256 signature (timing-safe) and refuses requests older than 5 minutes. It accepts only `event_callback` payloads for `app_mention`, or `message` in an `im` or `mpim`, and ignores deliveries whose `api_app_id` is not the install's Slack app.
 
 ## Migrating from the per-agent snap-ins
 

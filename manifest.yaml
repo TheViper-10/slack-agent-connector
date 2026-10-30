@@ -134,6 +134,11 @@ keyrings:
       description: Bot User OAuth Token (xoxb-…) of the Slack app this install connects. Use one Slack app per install.
       types:
         - snap_in_secret
+    - name: slack_signing_secret
+      display_name: Slack signing secret
+      description: Optional. Signing secret of the Slack app this install connects. Required only to accept Slack Events API deliveries on the slack-events trigger URL; without it those deliveries are dropped and the poller handles every message.
+      types:
+        - snap_in_secret
 
 event_sources:
   organization:
@@ -145,6 +150,34 @@ event_sources:
         cron: "* * * * *"
         metadata:
           event_key: slack_poll
+    - name: slack-events
+      display_name: Slack events
+      description: Optional Events API ingress for app mentions and DMs. Set the Slack app's Event Subscriptions Request URL to this source's trigger URL. The poller stays active as the safety net.
+      type: flow-custom-webhook
+      setup_instructions: |
+        In the Slack app's "Event Subscriptions", enable events and set the Request URL to `{{source.trigger_url}}`.
+        Subscribe to the bot events app_mention, message.im and message.mpim, and add the signing secret to the
+        "Slack signing secret" keyring.
+      config:
+        policy: |
+          package rego
+          output = {"event": event, "event_key": event_key, "response": response} {
+            input.request.body["type"] != "url_verification"
+            headers = {
+              "X-Slack-Request-Timestamp": object.get(input.request.headers, "X-Slack-Request-Timestamp", ""),
+              "X-Slack-Signature": object.get(input.request.headers, "X-Slack-Signature", ""),
+              "X-Slack-Retry-Num": object.get(input.request.headers, "X-Slack-Retry-Num", ""),
+            }
+            event = {"body": input.request.body, "headers": headers, "body_raw": input.request.body_raw}
+            event_key = "slack_events"
+            response = {"status_code": 200}
+          } else = {"response": response} {
+            response = {
+              "status_code": 200,
+              "headers": {"Content-Type": "text/plain"},
+              "body": input.request.body["challenge"],
+            }
+          }
     - name: agent-dm-events
       display_name: Agent response events
       description: Receives agent DM replies.
@@ -185,6 +218,11 @@ automations:
     source: slack-poll-timer
     event_types:
       - timer.tick
+    function: devrev_handler
+  - name: handle-slack-events
+    source: slack-events
+    event_types:
+      - custom:slack_events
     function: devrev_handler
   - name: relay-agent-response-to-slack
     source: agent-dm-events

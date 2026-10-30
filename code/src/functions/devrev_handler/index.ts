@@ -5,6 +5,7 @@ import { relayAsyncAgentResponse, relayAgentReply } from '../../agent/reply';
 import { DevRevClient } from '../../clients/devrev';
 import { type FunctionEvent, getKeyring } from '../../types';
 import runSlackPoller from '../slack_poller';
+import { handleSlackEvent, SLACK_EVENTS_EVENT_TYPE } from '../slack_events';
 import { type ManageSlackResponseInput, manageSlackResponse, type SlackResponseAction } from './manage_slack_response';
 
 // Native workflow operations use OperationOutput, not the HTTP-style hook response envelope.
@@ -111,6 +112,7 @@ const run = async (events: FunctionEvent[]): Promise<undefined | OperationOutput
   if (events.length === 1 && operationData(events[0])['node'] === 'manage_slack_response') return OperationOutput.fromJSON(await handleManageSlackResponse(events[0]));
   for (const event of events) {
     if (event.execution_metadata.event_type === 'timer.tick') await runSlackPoller([event]);
+    else if (event.execution_metadata.event_type === SLACK_EVENTS_EVENT_TYPE) await handleSlackEvent(event);
     else await handleEvent(event);
   }
   return undefined;

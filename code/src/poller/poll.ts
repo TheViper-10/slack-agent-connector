@@ -167,6 +167,21 @@ export const toEventPayload = (message: QualifiedMessage): Record<string, unknow
   };
 };
 
+export const newTickSummary = (): TickSummary => ({
+  channels: 0,
+  dispatched: 0,
+  duplicatesSkipped: 0,
+  errors: [],
+  firstRun: false,
+  grantedScopes: [],
+  inFlight: 0,
+  missingScopes: [],
+  threads: 0,
+});
+
+/** Outcome of handing one message to the poller outside a tick (the Events API ingress path). */
+export type HandleMessageResult = 'dispatched' | 'duplicate' | 'ignored' | 'in_flight';
+
 const byTsAscending = (a: SlackHistoryMessage, b: SlackHistoryMessage): number => Number(a.ts) - Number(b.ts);
 
 export class SlackPoller {
@@ -262,6 +277,21 @@ export class SlackPoller {
     } while (cursor);
     // The thread root is always returned; history owns it, so only replies newer than the cursor count here.
     return messages.filter((m) => m.ts && m.ts !== threadTs && tsGreater(m.ts, oldest)).sort(byTsAscending);
+  }
+
+  /**
+   * Single-message entry used by the Events API ingress: the same qualification, author check, receipt claim and
+   * thread watch the tick applies, so a message seen by both ingress paths is handled once.
+   */
+  async handleMessage(qualified: QualifiedMessage): Promise<HandleMessageResult> {
+    const { allowedChannels } = this.deps;
+    if (allowedChannels && !allowedChannels.has(qualified.channel)) return 'ignored';
+    if (!qualifies(qualified.message, qualified.isIm, this.deps.botUserId)) return 'ignored';
+    if (!(await this.isAllowedAuthor(qualified.message))) return 'ignored';
+    const summary = newTickSummary();
+    const handled = await this.processMessage(qualified, summary);
+    if (!handled) return 'in_flight';
+    return summary.dispatched > 0 ? 'dispatched' : 'duplicate';
   }
 
   /**
@@ -462,17 +492,7 @@ export class SlackPoller {
     const { store } = this.deps;
     this.tickStartMs = this.now();
     const tickTs = toSlackTs(this.tickStartMs);
-    const summary: TickSummary = {
-      channels: 0,
-      dispatched: 0,
-      duplicatesSkipped: 0,
-      errors: [],
-      firstRun: false,
-      grantedScopes: [],
-      inFlight: 0,
-      missingScopes: [],
-      threads: 0,
-    };
+    const summary = newTickSummary();
 
     const states = await store.listState();
     let global = states.find((s) => s.uniqueKey === globalKey(this.deps.installId));
