@@ -37,6 +37,19 @@ export const verifySlackSignature = (
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 };
 
+/**
+ * The bytes Slack signed. DevRev delivers `body_raw` JWT-shaped, with the request body as the header segment
+ * re-serialized without Slack's `\/` and `\uXXXX` escaping, so restore them (devrev-snap-ins
+ * `slack-message-agent` does the same). A plain JSON `body_raw` is used as is.
+ */
+export const slackSignedBody = (bodyRaw: string): string => {
+  if (bodyRaw.trimStart().startsWith('{')) return bodyRaw;
+  const decoded: unknown = JSON.parse(Buffer.from(bodyRaw.split('.')[0], 'base64url').toString('utf8'));
+  return JSON.stringify(decoded)
+    .replace(/\//g, '\\/')
+    .replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+};
+
 /** Maps an accepted Slack event to the message shape the poller produces; undefined for events we do not handle. */
 export const toQualifiedMessage = (envelope: SlackEnvelope): QualifiedMessage | undefined => {
   const event = envelope.event;
@@ -73,15 +86,22 @@ export const handleSlackEvent = async (
   if (!secret) return drop('slack_signing_secret is not configured');
   const payload = event.payload as SlackEventsPayload;
   const headers = payload.headers ?? {};
-  if (
-    !verifySlackSignature(secret, headers['X-Slack-Request-Timestamp'], headers['X-Slack-Signature'], payload.body_raw)
-  ) {
-    return drop('signature check failed');
+  let body: string | undefined;
+  try {
+    body = payload.body_raw === undefined ? undefined : slackSignedBody(payload.body_raw);
+  } catch {
+    return drop('body_raw could not be decoded');
+  }
+  if (!verifySlackSignature(secret, headers['X-Slack-Request-Timestamp'], headers['X-Slack-Signature'], body)) {
+    return drop(
+      `signature check failed (timestamp=${headers['X-Slack-Request-Timestamp'] ? 'present' : 'missing'} ` +
+        `signature=${headers['X-Slack-Signature'] ? 'present' : 'missing'} body=${body === undefined ? 'missing' : body.length})`
+    );
   }
 
   let envelope: SlackEnvelope;
   try {
-    envelope = JSON.parse(payload.body_raw!) as SlackEnvelope;
+    envelope = JSON.parse(body!) as SlackEnvelope;
   } catch {
     return drop('body is not JSON');
   }

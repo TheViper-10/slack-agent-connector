@@ -72,6 +72,33 @@ describe('slack_events ingress', () => {
     expect(claimReceipt).toHaveBeenCalledTimes(2);
   });
 
+  it('verifies a JWT-shaped body_raw against the Slack-escaped body Slack signed', async () => {
+    const { build, claimReceipt } = setup();
+    const event = makeEvent(SECRET);
+    const body = {
+      api_app_id: 'A1',
+      event: {
+        channel: 'C1',
+        text: '<@UBOT> see https://x/y café',
+        ts: '1790000000.000200',
+        type: 'app_mention',
+        user: 'U1',
+      },
+      type: 'event_callback',
+    };
+    const slackBytes = JSON.stringify(body).replace(/\//g, '\\/').replace('é', '\\u00e9');
+    const ts = String(Math.floor(Date.now() / 1000));
+    event.payload = {
+      body_raw: `${Buffer.from(JSON.stringify(body)).toString('base64url')}.e30.`,
+      headers: {
+        'X-Slack-Request-Timestamp': ts,
+        'X-Slack-Signature': sign(ts, slackBytes),
+      },
+    };
+    await expect(handleSlackEvent(event, build)).resolves.toBe('dispatched');
+    expect(claimReceipt.mock.calls[0].slice(0, 2)).toEqual(['C1', '1790000000.000200']);
+  });
+
   it('drops a bad signature or a missing secret without touching the receipt store', async () => {
     const { build, claimReceipt } = setup();
     await expect(handleSlackEvent(makeEvent(SECRET, 'other-secret'), build)).resolves.toBe('dropped');
